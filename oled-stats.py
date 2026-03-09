@@ -1,7 +1,3 @@
-# SPDX-FileCopyrightText: 2017 Tony DiCola for Adafruit Industries
-# SPDX-FileCopyrightText: 2017 James DeVito for Adafruit Industries
-# SPDX-License-Identifier: MIT
-
 # This example is for use on (Linux) computers that are using CPython with
 # Adafruit Blinka to support CircuitPython libraries. CircuitPython does
 # not support PIL/pillow (python imaging library)!
@@ -9,6 +5,7 @@
 import subprocess
 import time
 import os
+import sys
 
 import psutil
 import busio
@@ -92,59 +89,91 @@ def get_uptime():
         return f"Up: {days}d {hours}h {minutes}m"
     return f"Up: {hours}h {minutes}m"
 
-# --- Connection status helpers ---
+# --- Connection status helpers with cached ping ---
+INET_CHECK_INTERVAL = 10  # seconds between actual pings
+
+_last_inet_check = {
+    "eth":  (0, False),  # (last_check_timestamp, result)
+    "wifi": (0, False),
+}
+
+def is_internet_up(iface=None):
+    cmd = "ping -c 1 -W 1 8.8.8.8"
+    if iface:
+        cmd += f" -I {iface}"
+    result = subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return result.returncode == 0
+
 def is_ethernet_up():
-    for iface in os.listdir("/sys/class/net/"):
-        if iface.startswith(("eth", "enp", "enx", "en0")):
-            state = open(f"/sys/class/net/{iface}/operstate").read().strip()
-            if state == "up":
-                return True
-    return False
+    ts, cached = _last_inet_check["eth"]
+    if time.time() - ts > INET_CHECK_INTERVAL:
+        for iface in os.listdir("/sys/class/net/"):
+            if iface.startswith(("eth", "enp", "enx", "en0")):
+                state = open(f"/sys/class/net/{iface}/operstate").read().strip()
+                result = state == "up" and is_internet_up(iface)
+                _last_inet_check["eth"] = (time.time(), result)
+                return result
+        _last_inet_check["eth"] = (time.time(), False)
+        return False
+    return cached
 
 def is_wifi_up():
-    try:
-        result = subprocess.check_output("iwgetid -r 2>/dev/null", shell=True).decode().strip()
-        return bool(result)
-    except:
-        return False
+    ts, cached = _last_inet_check["wifi"]
+    if time.time() - ts > INET_CHECK_INTERVAL:
+        try:
+            ssid = subprocess.check_output("iwgetid -r 2>/dev/null", shell=True).decode().strip()
+            result = bool(ssid) and is_internet_up("wlan0")
+        except:
+            result = False
+        _last_inet_check["wifi"] = (time.time(), result)
+        return result
+    return cached
 
-while True:
-    # Clear canvas
-    draw.rectangle((0, 0, width, height), outline=0, fill=0)
+try:
+    while True:
+        # Clear canvas
+        draw.rectangle((0, 0, width, height), outline=0, fill=0)
 
-    # --- Hostname (top row) ---
-    hostname = subprocess.check_output("hostname", shell=True).decode("utf-8").strip()
-    draw.text((0, 0), "Host: " + hostname, font=font, fill=255)
+        # --- Hostname (top row) ---
+        hostname = subprocess.check_output("hostname", shell=True).decode("utf-8").strip()
+        draw.text((0, 0), "Host: " + hostname, font=font, fill=255)
 
-    # --- Connection icons (top-right corner) ---
-    # Ethernet at x=104, Wifi at x=116 — two 12px icons with 0px gap
-    image.paste(icon_eth_up  if is_ethernet_up() else icon_eth_down,  (100, 4))
-    image.paste(icon_wifi_up if is_wifi_up()     else icon_wifi_down, (116, 4))
+        # --- Connection icons (top-right corner) ---
+        # Ethernet at x=104, Wifi at x=116 — two 12px icons with 0px gap
+        image.paste(icon_eth_up  if is_ethernet_up() else icon_eth_down,  (100, 4))
+        image.paste(icon_wifi_up if is_wifi_up()     else icon_wifi_down, (116, 4))
 
-    # --- IP address ---
-    cmd = "hostname -I | cut -d' ' -f1"
-    ip = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
-    draw.text((0, 14), "IP: " + ip, font=font, fill=255)
+        # --- IP address ---
+        cmd = "hostname -I | cut -d' ' -f1"
+        ip = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
+        draw.text((0, 14), "IP: " + ip, font=font, fill=255)
 
-    # --- CPU bar ---
-    # interval=0.1 gives a non-blocking reading; adjust if you want more accuracy
-    cpu_pct = psutil.cpu_percent(interval=0.1)
-    draw_bar(draw, x=0, y=26, label="CPU", pct=cpu_pct)
+        # --- CPU bar ---
+        # interval=0.1 gives a non-blocking reading; adjust if you want more accuracy
+        cpu_pct = psutil.cpu_percent(interval=0.1)
+        draw_bar(draw, x=0, y=26, label="CPU", pct=cpu_pct)
 
-    # --- RAM bar ---
-    mem = psutil.virtual_memory()
-    ram_pct = mem.percent
-    draw_bar(draw, x=0, y=38, label="RAM", pct=ram_pct)
+        # --- RAM bar ---
+        mem = psutil.virtual_memory()
+        ram_pct = mem.percent
+        draw_bar(draw, x=0, y=38, label="RAM", pct=ram_pct)
 
-    # --- 5th line: alternate disk / uptime every 2 seconds ---
-    if int(time.time() / 5) % 2 == 0:
-        cmd = 'df -h | awk \'$NF=="/"{printf "Disk: %s/%s  %s", $3,$2,$5}\''
-        bottom_text = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
-    else:
-        bottom_text = get_uptime()
-    draw.text((0, 52), bottom_text, font=font, fill=128)
+        # --- 5th line: alternate disk / uptime every 2 seconds ---
+        if int(time.time() / 5) % 2 == 0:
+            cmd = 'df -h | awk \'$NF=="/"{printf "Disk: %s/%s  %s", $3,$2,$5}\''
+            bottom_text = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
+        else:
+            bottom_text = get_uptime()
+        draw.text((0, 52), bottom_text, font=font, fill=128)
 
-    # Push to display
-    disp.image(image)
+        # Push to display
+        disp.image(image)
+        disp.show()
+        time.sleep(0.5)
+except KeyboardInterrupt:
+    pass
+finally:
+    disp.fill(0)
     disp.show()
-    time.sleep(0.5)
+
+sys.exit(0)
