@@ -1,0 +1,15 @@
+[Unit]
+Description=OLED Stats Display
+After=network.target
+
+[Service]
+ExecStart=/home/lavonzux/oled-stats/.venv/bin/python /home/lavonzux/oled-stats/oled_stats.py
+WorkingDirectory=/home/lavonzux/oled-stats
+StandardOutput=journal
+StandardError=journal
+Restart=on-failure
+RestartSec=5
+User=lavonzux
+
+[Install]
+WantedBy=multi-user.target
