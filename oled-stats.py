@@ -1,6 +1,10 @@
-# This example is for use on (Linux) computers that are using CPython with
-# Adafruit Blinka to support CircuitPython libraries. CircuitPython does
-# not support PIL/pillow (python imaging library)!
+# =============================================================================
+# OLED Stats Display
+#
+# Displays system status on a 128x64 SSD1306 OLED connected via I2C.
+# Designed for the 52Pi Mini Tower Kit (UPS Plus EP-0136 + OLED S-0005).
+# For hardware documentation, visit: https://wiki.52pi.com
+# =============================================================================
 
 import subprocess
 import time
@@ -15,21 +19,26 @@ from PIL import Image, ImageDraw, ImageFont
 
 import adafruit_ssd1306
 
-# Icons
-img_bootup         = Image.open("./icon/bootup.bmp")
-img_shutdown       = Image.open("./icon/shutdown.bmp")
-icon_eth_up    = Image.open("./icon/eth_up.bmp")
-icon_eth_down  = Image.open("./icon/eth_down.bmp")
-icon_wifi_up   = Image.open("./icon/wifi_up.bmp")
-icon_wifi_down = Image.open("./icon/wifi_down.bmp")
+# ─── Configuration ───────────────────────────────────────────────────────────
+I2C_ADDR   = 0x3C   # SSD1306 default; some modules use 0x3D
+OLED_WIDTH = 128
+OLED_HEIGHT = 64
 
-# Create the I2C interface.
+# Resolve paths relative to this script's directory, so it works regardless
+# of the current working directory (e.g. when launched by systemd).
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ─── Icons ───────────────────────────────────────────────────────────────────
+img_bootup     = Image.open(os.path.join(BASE_DIR, "icon/bootup.bmp"))
+img_shutdown   = Image.open(os.path.join(BASE_DIR, "icon/shutdown.bmp"))
+icon_eth_up    = Image.open(os.path.join(BASE_DIR, "icon/eth_up.bmp"))
+icon_eth_down  = Image.open(os.path.join(BASE_DIR, "icon/eth_down.bmp"))
+icon_wifi_up   = Image.open(os.path.join(BASE_DIR, "icon/wifi_up.bmp"))
+icon_wifi_down = Image.open(os.path.join(BASE_DIR, "icon/wifi_down.bmp"))
+
+# ─── Display init ────────────────────────────────────────────────────────────
 i2c = busio.I2C(SCL, SDA)
-
-# Create the SSD1306 OLED class.
-# The first two parameters are the pixel width and pixel height.  Change these
-# to the right size for your display!
-disp = adafruit_ssd1306.SSD1306_I2C(128, 64, i2c)
+disp = adafruit_ssd1306.SSD1306_I2C(OLED_WIDTH, OLED_HEIGHT, i2c, addr=I2C_ADDR)
 
 # Clear display.
 disp.fill(0)
@@ -51,23 +60,16 @@ draw.rectangle((0, 0, width, height), outline=0, fill=0)
 font = ImageFont.load_default()
 
 # Bootup splash image
-image.paste(img_bootup, (0,0))
+image.paste(img_bootup, (0, 0))
 disp.image(image)
 disp.show()
 time.sleep(3)
 
 
-# Helper functions
-# --- Bar drawing helper ---
-# Draws a labelled progress bar, e.g.:
-#
-#   CPU [########    ] 67%
-#
-# x, y        — top-left origin of the bar row
-# label       — short string shown before the bar (e.g. "CPU")
-# pct         — 0.0–100.0
-# bar_height  — thickness of the bar in pixels (default 6)
+# ─── Helper functions ────────────────────────────────────────────────────────
+
 def draw_bar(draw, x, y, label, pct, bar_height=6):
+    """Draw a labelled progress bar, e.g.:  CPU [########    ] 67%"""
     label_w = 24          # pixels reserved for the label text
     pct_w   = 26          # pixels reserved for the "XX%" text on the right
     bar_x   = x + label_w
@@ -87,9 +89,9 @@ def draw_bar(draw, x, y, label, pct, bar_height=6):
     # Percentage text
     draw.text((bar_x + bar_w + 3, y), f"{pct:.0f}%", font=font, fill=255)
 
-# Get system uptime using psutil
+
 def get_uptime():
-    # uptime_seconds is a float of total seconds since boot
+    """Get system uptime as a human-readable string."""
     uptime_seconds = time.time() - psutil.boot_time()
     days    = int(uptime_seconds // 86400)
     hours   = int((uptime_seconds % 86400) // 3600)
@@ -98,7 +100,8 @@ def get_uptime():
         return f"Up: {days}d {hours}h {minutes}m"
     return f"Up: {hours}h {minutes}m"
 
-# --- Connection status helpers with cached ping ---
+
+# ─── Connection status helpers with cached ping ─────────────────────────────
 INET_CHECK_INTERVAL = 10  # seconds between actual pings
 
 _last_inet_check = {
@@ -106,12 +109,14 @@ _last_inet_check = {
     "wifi": (0, False),
 }
 
+
 def is_internet_up(iface=None):
     cmd = "ping -c 1 -W 1 8.8.8.8"
     if iface:
         cmd += f" -I {iface}"
     result = subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return result.returncode == 0
+
 
 def is_ethernet_up():
     ts, cached = _last_inet_check["eth"]
@@ -126,19 +131,23 @@ def is_ethernet_up():
         return False
     return cached
 
+
 def is_wifi_up():
     ts, cached = _last_inet_check["wifi"]
     if time.time() - ts > INET_CHECK_INTERVAL:
         try:
             ssid = subprocess.check_output("iwgetid -r 2>/dev/null", shell=True).decode().strip()
             result = bool(ssid) and is_internet_up("wlan0")
-        except:
+        except Exception:
             result = False
         _last_inet_check["wifi"] = (time.time(), result)
         return result
     return cached
 
+
+# ─── Graceful shutdown ───────────────────────────────────────────────────────
 shutdown_requested = False
+
 def handle_shutdown(signum, frame):
     global shutdown_requested
     shutdown_requested = True
@@ -146,6 +155,7 @@ def handle_shutdown(signum, frame):
 signal.signal(signal.SIGTERM, handle_shutdown)
 signal.signal(signal.SIGINT, handle_shutdown)
 
+# ─── Main loop ───────────────────────────────────────────────────────────────
 try:
     while not shutdown_requested:
         # Clear canvas
@@ -156,7 +166,7 @@ try:
         draw.text((0, 0), "Host: " + hostname, font=font, fill=255)
 
         # --- Connection icons (top-right corner) ---
-        # Ethernet at x=104, Wifi at x=116 — two 12px icons with 0px gap
+        # Ethernet at x=100, Wifi at x=116 — two 12px icons with 0px gap
         image.paste(icon_eth_up  if is_ethernet_up() else icon_eth_down,  (100, 4))
         image.paste(icon_wifi_up if is_wifi_up()     else icon_wifi_down, (116, 4))
 
@@ -175,7 +185,7 @@ try:
         ram_pct = mem.percent
         draw_bar(draw, x=0, y=38, label="RAM", pct=ram_pct)
 
-        # --- 5th line: alternate disk / uptime every 2 seconds ---
+        # --- 5th line: alternate disk / uptime every 5 seconds ---
         if int(time.time() / 5) % 2 == 0:
             cmd = 'df -h | awk \'$NF=="/"{printf "Disk: %s/%s  %s", $3,$2,$5}\''
             bottom_text = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
