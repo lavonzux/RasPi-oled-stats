@@ -1,12 +1,15 @@
 # RasPi-oled-stats
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+
+English | [中文版](README_zh-TW.md)
+
 A lightweight system monitor for **128×64 SSD1306 OLED displays** on Raspberry Pi.
 
 Shows hostname, IP address, CPU / RAM usage bars, disk usage, uptime, and network connectivity status — all refreshed in real time.
 
 Designed for the [52Pi Mini Tower Kit](https://wiki.52pi.com) (UPS Plus EP-0136 + OLED S-0005), but should work with any I2C-connected SSD1306 display.
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
 ## Display Layout
 
