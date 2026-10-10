@@ -1,12 +1,15 @@
 # RasPi-oled-stats
 
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+
+[English](README.md) | 中文版
+
 在 Raspberry Pi 上驅動 **128×64 SSD1306 OLED 顯示器**的輕量系統監控工具。
 
 即時顯示主機名稱、IP 位址、CPU / RAM 使用率進度條、磁碟用量、系統運行時間與網路連線狀態。
 
 專為 [52Pi Mini Tower Kit](https://wiki.52pi.com)（UPS Plus EP-0136 + OLED S-0005）設計，但應可適用於任何透過 I2C 連接的 SSD1306 顯示器。
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
 ## 顯示畫面
 
