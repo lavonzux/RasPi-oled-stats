@@ -9,10 +9,10 @@ echo "Enabling I2C..."
 sudo raspi-config nonint do_i2c 0
 
 echo "Creating venv..."
-python3 -m venv venv
+python3 -m venv .venv
 
 echo "Installing Python packages..."
-./venv/bin/pip install -r requirements.txt
+./.venv/bin/pip install -r requirements.txt
 
 echo "Installing systemd service..."
 sudo cp oled-stats.service /etc/systemd/system/
