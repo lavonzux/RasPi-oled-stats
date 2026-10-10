@@ -6,6 +6,7 @@ import subprocess
 import time
 import os
 import sys
+import signal
 
 import psutil
 import busio
@@ -15,6 +16,8 @@ from PIL import Image, ImageDraw, ImageFont
 import adafruit_ssd1306
 
 # Icons
+img_bootup         = Image.open("./icon/bootup.bmp")
+img_shutdown       = Image.open("./icon/shutdown.bmp")
 icon_eth_up    = Image.open("./icon/eth_up.bmp")
 icon_eth_down  = Image.open("./icon/eth_down.bmp")
 icon_wifi_up   = Image.open("./icon/wifi_up.bmp")
@@ -46,6 +49,12 @@ draw.rectangle((0, 0, width, height), outline=0, fill=0)
 
 # Load default font.
 font = ImageFont.load_default()
+
+# Bootup splash image
+image.paste(img_bootup, (0,0))
+disp.image(image)
+disp.show()
+time.sleep(3)
 
 
 # Helper functions
@@ -129,8 +138,16 @@ def is_wifi_up():
         return result
     return cached
 
+shutdown_requested = False
+def handle_shutdown(signum, frame):
+    global shutdown_requested
+    shutdown_requested = True
+
+signal.signal(signal.SIGTERM, handle_shutdown)
+signal.signal(signal.SIGINT, handle_shutdown)
+
 try:
-    while True:
+    while not shutdown_requested:
         # Clear canvas
         draw.rectangle((0, 0, width, height), outline=0, fill=0)
 
@@ -169,11 +186,13 @@ try:
         # Push to display
         disp.image(image)
         disp.show()
-        time.sleep(0.5)
+        time.sleep(1)
 except KeyboardInterrupt:
     pass
 finally:
-    disp.fill(0)
+    draw.rectangle((0, 0, width, height), outline=0, fill=0)
+    image.paste(img_shutdown, (0, 0))
+    disp.image(image)
     disp.show()
 
 sys.exit(0)

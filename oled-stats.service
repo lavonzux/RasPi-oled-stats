@@ -10,6 +10,8 @@ StandardError=journal
 Restart=on-failure
 RestartSec=5
 User=lavonzux
+TimeoutStopSec=5
+KillSignal=SIGTERM
 
 [Install]
 WantedBy=multi-user.target
