@@ -1,0 +1,47 @@
+# OLED Stats Display — Panel Configuration
+# ──────────────────────────────────────────
+# Each row in `layout` maps to one horizontal line on the 128×64 OLED.
+# A row with multiple items rotates through them; `duration` sets how
+# many update cycles each item stays visible before switching.
+# Rows with a single item display permanently (duration is ignored).
+#
+# height (optional): pixel height for this row.
+#   Rows without `height` split the remaining vertical space equally.
+#   The display is 64 px tall — make sure fixed heights leave enough
+#   room for the auto-sized rows.
+
+panel:
+  rows: 5               # number of display rows
+  update_interval: 1    # seconds between screen refreshes
+
+layout:
+  # Row 0 — hostname
+  - heights: 14
+    items:
+      - type: hostname
+
+  # Row 1 — network status (eth ↔ wifi, rotate every 3 cycles)
+  - height: 14           # extra room for 12×12 icons
+    items:
+      - type: net_status
+        interface: eth
+        duration: 3
+      - type: net_status
+        interface: wifi
+        duration: 3
+
+  # Row 2 — CPU usage bar
+  - items:
+      - type: cpu_bar
+
+  # Row 3 — RAM usage bar
+  - items:
+      - type: ram_bar
+
+  # Row 4 — disk usage ↔ uptime (rotate every 5 cycles)
+  - height: 14           # use the bottom margin
+    items:
+      - type: disk
+        duration: 5
+      - type: uptime
+        duration: 5

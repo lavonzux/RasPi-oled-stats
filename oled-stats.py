@@ -1,208 +1,343 @@
-# =============================================================================
-# OLED Stats Display
-#
-# Displays system status on a 128x64 SSD1306 OLED connected via I2C.
-# Designed for the 52Pi Mini Tower Kit (UPS Plus EP-0136 + OLED S-0005).
-# For hardware documentation, visit: https://wiki.52pi.com
-# =============================================================================
+# OLED Stats Display — modular, config-driven
+# Drives a 128×64 SSD1306 OLED over I2C on Raspberry Pi.
+# Layout is defined in config.yaml; each row can hold one or more
+# widgets that rotate on a configurable cycle.
 
-import subprocess
-import time
 import os
-import sys
 import signal
+import socket
+import subprocess
+import sys
+import time
 
 import psutil
+import yaml
 import busio
 from board import SCL, SDA
 from PIL import Image, ImageDraw, ImageFont
 
 import adafruit_ssd1306
 
-# ─── Configuration ───────────────────────────────────────────────────────────
-I2C_ADDR   = 0x3C   # SSD1306 default; some modules use 0x3D
-OLED_WIDTH = 128
-OLED_HEIGHT = 64
-
-# Resolve paths relative to this script's directory, so it works regardless
-# of the current working directory (e.g. when launched by systemd).
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ─── Icons ───────────────────────────────────────────────────────────────────
-img_bootup     = Image.open(os.path.join(BASE_DIR, "icon/bootup.bmp"))
-img_shutdown   = Image.open(os.path.join(BASE_DIR, "icon/shutdown.bmp"))
-icon_eth_up    = Image.open(os.path.join(BASE_DIR, "icon/eth_up.bmp"))
-icon_eth_down  = Image.open(os.path.join(BASE_DIR, "icon/eth_down.bmp"))
-icon_wifi_up   = Image.open(os.path.join(BASE_DIR, "icon/wifi_up.bmp"))
-icon_wifi_down = Image.open(os.path.join(BASE_DIR, "icon/wifi_down.bmp"))
 
-# ─── Display init ────────────────────────────────────────────────────────────
-i2c = busio.I2C(SCL, SDA)
-disp = adafruit_ssd1306.SSD1306_I2C(OLED_WIDTH, OLED_HEIGHT, i2c, addr=I2C_ADDR)
+# ── Config ──────────────────────────────────────────────────────────
 
-# Clear display.
-disp.fill(0)
-disp.show()
-
-# Create blank image for drawing.
-# Make sure to create image with mode '1' for 1-bit color.
-width = disp.width
-height = disp.height
-image = Image.new("1", (width, height))
-
-# Get drawing object to draw on image.
-draw = ImageDraw.Draw(image)
-
-# Draw a black filled box to clear the image.
-draw.rectangle((0, 0, width, height), outline=0, fill=0)
-
-# Load default font.
-font = ImageFont.load_default()
-
-# Bootup splash image
-image.paste(img_bootup, (0, 0))
-disp.image(image)
-disp.show()
-time.sleep(3)
-
-
-# ─── Helper functions ────────────────────────────────────────────────────────
-
-def draw_bar(draw, x, y, label, pct, bar_height=6):
-    """Draw a labelled progress bar, e.g.:  CPU [########    ] 67%"""
-    label_w = 24          # pixels reserved for the label text
-    pct_w   = 26          # pixels reserved for the "XX%" text on the right
-    bar_x   = x + label_w
-    bar_w   = width - label_w - pct_w - x  # remaining width for the bar
-
-    # Label
-    draw.text((x, y), label, font=font, fill=255)
-
-    # Outline rectangle
-    draw.rectangle((bar_x, y+3, bar_x + bar_w, y+3 + bar_height), outline=255, fill=0)
-
-    # Filled portion
-    fill_w = int(bar_w * max(0.0, min(pct, 100.0)) / 100.0)
-    if fill_w > 0:
-        draw.rectangle((bar_x, y+3, bar_x + fill_w, y+3 + bar_height), outline=255, fill=255)
-
-    # Percentage text
-    draw.text((bar_x + bar_w + 3, y), f"{pct:.0f}%", font=font, fill=255)
-
-
-def get_uptime():
-    """Get system uptime as a human-readable string."""
-    uptime_seconds = time.time() - psutil.boot_time()
-    days    = int(uptime_seconds // 86400)
-    hours   = int((uptime_seconds % 86400) // 3600)
-    minutes = int((uptime_seconds % 3600) // 60)
-    if days > 0:
-        return f"Up: {days}d {hours}h {minutes}m"
-    return f"Up: {hours}h {minutes}m"
-
-
-# ─── Connection status helpers with cached ping ─────────────────────────────
-INET_CHECK_INTERVAL = 10  # seconds between actual pings
-
-_last_inet_check = {
-    "eth":  (0, False),  # (last_check_timestamp, result)
-    "wifi": (0, False),
+DEFAULT_CONFIG = {
+    "panel": {"rows": 5, "update_interval": 1},
+    "layout": [
+        {"items": [{"type": "hostname"}]},
+        {"items": [
+            {"type": "net_status", "interface": "eth", "duration": 3},
+            {"type": "net_status", "interface": "wifi", "duration": 3},
+        ]},
+        {"items": [{"type": "cpu_bar"}]},
+        {"items": [{"type": "ram_bar"}]},
+        {"items": [
+            {"type": "disk", "duration": 5},
+            {"type": "uptime", "duration": 5},
+        ]},
+    ],
 }
 
 
-def is_internet_up(iface=None):
-    cmd = "ping -c 1 -W 1 8.8.8.8"
+def load_config():
+    path = os.path.join(BASE_DIR, "config.yaml")
+    if os.path.exists(path):
+        with open(path) as f:
+            return yaml.safe_load(f)
+    return DEFAULT_CONFIG
+
+
+# ── Network helpers ─────────────────────────────────────────────────
+
+INET_CHECK_INTERVAL = 10          # seconds between real pings
+
+_net_cache = {
+    "eth":  {"ts": 0, "link_up": False, "inet_up": False, "ip": "", "has_gw": False},
+    "wifi": {"ts": 0, "link_up": False, "inet_up": False, "ip": "", "has_gw": False},
+}
+
+
+def _ping(iface=None):
+    cmd = ["ping", "-c", "1", "-W", "1", "8.8.8.8"]
     if iface:
-        cmd += f" -I {iface}"
-    result = subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return result.returncode == 0
+        cmd += ["-I", iface]
+    return subprocess.run(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    ).returncode == 0
 
 
-def is_ethernet_up():
-    ts, cached = _last_inet_check["eth"]
-    if time.time() - ts > INET_CHECK_INTERVAL:
-        for iface in os.listdir("/sys/class/net/"):
-            if iface.startswith(("eth", "enp", "enx", "en0")):
-                state = open(f"/sys/class/net/{iface}/operstate").read().strip()
-                result = state == "up" and is_internet_up(iface)
-                _last_inet_check["eth"] = (time.time(), result)
-                return result
-        _last_inet_check["eth"] = (time.time(), False)
-        return False
-    return cached
+def _iface_ip(name):
+    """IPv4 address for a given interface, via psutil."""
+    for addr in psutil.net_if_addrs().get(name, []):
+        if addr.family == socket.AF_INET:
+            return addr.address
+    return ""
 
 
-def is_wifi_up():
-    ts, cached = _last_inet_check["wifi"]
-    if time.time() - ts > INET_CHECK_INTERVAL:
-        try:
-            ssid = subprocess.check_output("iwgetid -r 2>/dev/null", shell=True).decode().strip()
-            result = bool(ssid) and is_internet_up("wlan0")
-        except Exception:
-            result = False
-        _last_inet_check["wifi"] = (time.time(), result)
-        return result
-    return cached
+def _find_iface(prefixes):
+    """Return the first operstate=up interface matching *prefixes*."""
+    for name in os.listdir("/sys/class/net/"):
+        if name.startswith(prefixes):
+            try:
+                state = open(f"/sys/class/net/{name}/operstate").read().strip()
+                if state == "up":
+                    return name
+            except OSError:
+                pass
+    return None
 
 
-# ─── Graceful shutdown ───────────────────────────────────────────────────────
-shutdown_requested = False
+def _has_default_route(iface):
+    """Check whether *iface* carries a default route (dest 00000000)."""
+    try:
+        with open("/proc/net/route") as f:
+            for line in f:
+                fields = line.strip().split("\t")
+                if len(fields) >= 2 and fields[0] == iface and fields[1] == "00000000":
+                    return True
+    except OSError:
+        pass
+    return False
 
-def handle_shutdown(signum, frame):
-    global shutdown_requested
-    shutdown_requested = True
 
-signal.signal(signal.SIGTERM, handle_shutdown)
-signal.signal(signal.SIGINT, handle_shutdown)
+def get_net_info(kind):
+    """Return cached dict for 'eth' or 'wifi'.
 
-# ─── Main loop ───────────────────────────────────────────────────────────────
-try:
-    while not shutdown_requested:
-        # Clear canvas
-        draw.rectangle((0, 0, width, height), outline=0, fill=0)
+    Keys: link_up, inet_up, ip, has_gw.
+    """
+    c = _net_cache[kind]
+    if time.time() - c["ts"] <= INET_CHECK_INTERVAL:
+        return c
 
-        # --- Hostname (top row) ---
-        hostname = subprocess.check_output("hostname", shell=True).decode("utf-8").strip()
-        draw.text((0, 0), "Host: " + hostname, font=font, fill=255)
+    prefixes = ("eth", "enp", "enx", "en0") if kind == "eth" else ("wlan",)
+    iface = _find_iface(prefixes)
 
-        # --- Connection icons (top-right corner) ---
-        # Ethernet at x=100, Wifi at x=116 — two 12px icons with 0px gap
-        image.paste(icon_eth_up  if is_ethernet_up() else icon_eth_down,  (100, 4))
-        image.paste(icon_wifi_up if is_wifi_up()     else icon_wifi_down, (116, 4))
+    link_up = False
+    inet_up = False
+    ip = ""
+    has_gw = False
 
-        # --- IP address ---
-        cmd = "hostname -I | cut -d' ' -f1"
-        ip = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
-        draw.text((0, 14), "IP: " + ip, font=font, fill=255)
+    if iface:
+        ip = _iface_ip(iface)
+        link_up = bool(ip)
+        has_gw = _has_default_route(iface)
+        if has_gw and link_up:
+            inet_up = _ping(iface)
 
-        # --- CPU bar ---
-        # interval=0.1 gives a non-blocking reading; adjust if you want more accuracy
-        cpu_pct = psutil.cpu_percent(interval=0.1)
-        draw_bar(draw, x=0, y=26, label="CPU", pct=cpu_pct)
+    c.update(ts=time.time(), link_up=link_up, inet_up=inet_up, ip=ip, has_gw=has_gw)
+    return c
 
-        # --- RAM bar ---
-        mem = psutil.virtual_memory()
-        ram_pct = mem.percent
-        draw_bar(draw, x=0, y=38, label="RAM", pct=ram_pct)
 
-        # --- 5th line: alternate disk / uptime every 5 seconds ---
-        if int(time.time() / 5) % 2 == 0:
-            cmd = 'df -h | awk \'$NF=="/"{printf "Disk: %s/%s  %s", $3,$2,$5}\''
-            bottom_text = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
-        else:
-            bottom_text = get_uptime()
-        draw.text((0, 52), bottom_text, font=font, fill=128)
+# ── Drawing primitives ──────────────────────────────────────────────
 
-        # Push to display
-        disp.image(image)
-        disp.show()
-        time.sleep(1)
-except KeyboardInterrupt:
-    pass
-finally:
-    draw.rectangle((0, 0, width, height), outline=0, fill=0)
-    image.paste(img_shutdown, (0, 0))
-    disp.image(image)
+def draw_bar(draw, x, y, label, pct, total_w, font, bar_h=6):
+    """Labelled progress bar:  CPU [########    ] 67%"""
+    label_w = 24
+    pct_w   = 26
+    bar_x   = x + label_w
+    bar_w   = total_w - label_w - pct_w - x
+
+    draw.text((x, y), label, font=font, fill=255)
+    draw.rectangle(
+        (bar_x, y + 3, bar_x + bar_w, y + 3 + bar_h),
+        outline=255, fill=0,
+    )
+    fill_w = int(bar_w * max(0, min(pct, 100)) / 100)
+    if fill_w > 0:
+        draw.rectangle(
+            (bar_x, y + 3, bar_x + fill_w, y + 3 + bar_h),
+            outline=255, fill=255,
+        )
+    draw.text((bar_x + bar_w + 3, y), f"{pct:.0f}%", font=font, fill=255)
+
+
+def format_uptime():
+    secs = time.time() - psutil.boot_time()
+    d = int(secs // 86400)
+    h = int((secs % 86400) // 3600)
+    m = int((secs % 3600) // 60)
+    return f"Up: {d}d {h}h {m}m" if d else f"Up: {h}h {m}m"
+
+
+# ── Widget renderers ────────────────────────────────────────────────
+# Signature: (draw, image, x, y, width, font, cfg, icons) -> None
+
+def w_hostname(draw, image, x, y, width, font, cfg, icons):
+    draw.text((x, y), "Host: " + socket.gethostname(), font=font, fill=255)
+
+
+def w_net_status(draw, image, x, y, width, font, cfg, icons):
+    kind = cfg.get("interface", "eth")
+    info = get_net_info(kind)
+
+    cx = x
+
+    # ── Default-route indicator: * or blank (fixed-width for alignment)
+    if info["has_gw"]:
+        draw.text((cx, y), "*", font=font, fill=255)
+    cx += 8
+
+    # ── Interface-type icon (12×12 bmp)
+    icon = icons.get(kind)
+    if icon:
+        image.paste(icon, (cx, y))
+        cx += icon.width + 2
+
+    # ── Internet-access icon (only for default-route interfaces)
+    if info["has_gw"]:
+        inet_key = "inet_up" if info["inet_up"] else "inet_down"
+        inet_icon = icons.get(inet_key)
+        if inet_icon:
+            image.paste(inet_icon, (cx, y))
+            cx += inet_icon.width + 1
+
+    # ── IP address
+    draw.text((cx, y), ": " + (info["ip"] or "N/A"), font=font, fill=255)
+
+
+def w_cpu_bar(draw, image, x, y, width, font, cfg, icons):
+    draw_bar(draw, x, y, "CPU", psutil.cpu_percent(interval=0.1), width, font)
+
+
+def w_ram_bar(draw, image, x, y, width, font, cfg, icons):
+    draw_bar(draw, x, y, "RAM", psutil.virtual_memory().percent, width, font)
+
+
+def w_disk(draw, image, x, y, width, font, cfg, icons):
+    du = psutil.disk_usage("/")
+    used  = du.used  / (1024 ** 3)
+    total = du.total / (1024 ** 3)
+    draw.text(
+        (x, y),
+        f"Disk: {used:.1f}G/{total:.0f}G  {du.percent:.0f}%",
+        font=font, fill=255,
+    )
+
+
+def w_uptime(draw, image, x, y, width, font, cfg, icons):
+    draw.text((x, y), format_uptime(), font=font, fill=255)
+
+
+WIDGETS = {
+    "hostname":   w_hostname,
+    "net_status": w_net_status,
+    "cpu_bar":    w_cpu_bar,
+    "ram_bar":    w_ram_bar,
+    "disk":       w_disk,
+    "uptime":     w_uptime,
+}
+
+
+# ── Main ────────────────────────────────────────────────────────────
+
+def main():
+    config   = load_config()
+    panel    = config["panel"]
+    layout   = config["layout"]
+    rows     = panel.get("rows", 5)
+    interval = panel.get("update_interval", 1)
+
+    # Display
+    i2c  = busio.I2C(SCL, SDA)
+    disp = adafruit_ssd1306.SSD1306_I2C(128, 64, i2c)
+    disp.fill(0)
     disp.show()
 
-sys.exit(0)
+    W, H   = disp.width, disp.height
+    image  = Image.new("1", (W, H))
+    draw   = ImageDraw.Draw(image)
+    font   = ImageFont.load_default()
+
+    # Pre-compute y positions: rows with explicit `height` get it;
+    # the rest split whatever vertical space remains equally.
+    active  = layout[:rows]
+    fixed   = sum(r["height"] for r in active if "height" in r)
+    n_auto  = sum(1 for r in active if "height" not in r)
+    auto_h  = (H - fixed) // n_auto if n_auto else 0
+    y_table = []
+    y = 0
+    for r in active:
+        y_table.append(y)
+        y += r.get("height", auto_h)
+
+    # Load icons
+    icon_dir = os.path.join(BASE_DIR, "icon")
+    icons = {}
+    for name, fname in (
+        ("eth",       "eth_up.bmp"),
+        ("wifi",      "wifi_up.bmp"),
+        ("inet_up",   "inet_up.bmp"),
+        ("inet_down", "inet_down.bmp"),
+        ("bootup",    "bootup.bmp"),
+        ("shutdown",  "shutdown.bmp"),
+    ):
+        p = os.path.join(icon_dir, fname)
+        if os.path.exists(p):
+            icons[name] = Image.open(p)
+
+    # Bootup splash
+    if "bootup" in icons:
+        image.paste(icons["bootup"], (0, 0))
+        disp.image(image)
+        disp.show()
+        time.sleep(3)
+
+    # Graceful shutdown
+    shutdown = False
+    def _sig(sig, frame):
+        nonlocal shutdown
+        shutdown = True
+    signal.signal(signal.SIGTERM, _sig)
+    signal.signal(signal.SIGINT,  _sig)
+
+    cycle = 0
+    try:
+        while not shutdown:
+            draw.rectangle((0, 0, W, H), outline=0, fill=0)
+
+            for idx, row in enumerate(active):
+                y     = y_table[idx]
+                items = row.get("items", [])
+                if not items:
+                    continue
+
+                # Single item → always visible; multiple → rotate by duration
+                if len(items) == 1:
+                    item = items[0]
+                else:
+                    total = sum(it.get("duration", 1) for it in items)
+                    pos   = cycle % total
+                    acc   = 0
+                    item  = items[0]
+                    for it in items:
+                        d = it.get("duration", 1)
+                        if pos < acc + d:
+                            item = it
+                            break
+                        acc += d
+
+                renderer = WIDGETS.get(item.get("type"))
+                if renderer:
+                    renderer(draw, image, 0, y, W, font, item, icons)
+
+            disp.image(image)
+            disp.show()
+            cycle += 1
+            time.sleep(interval)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        draw.rectangle((0, 0, W, H), outline=0, fill=0)
+        if "shutdown" in icons:
+            image.paste(icons["shutdown"], (0, 0))
+        disp.image(image)
+        disp.show()
+
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()
