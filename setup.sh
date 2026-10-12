@@ -282,7 +282,7 @@ else
       # Config says I2C is on, but /dev/i2c-* doesn't exist — unusual.
       # Could be: module not loaded yet, needs reboot, or hardware issue.
       warn "I2C is enabled in ${BOOT_CONFIG} but /dev/i2c-* not found."
-      if ! lsmod 2>/dev/null | grep -q i2c_dev; then
+      if ! grep -qw i2c_dev /proc/modules 2>/dev/null; then
         hint "The i2c-dev kernel module is not loaded."
         hint "Try:  sudo modprobe i2c-dev"
         hint "If that works, a reboot should make it persistent."
@@ -306,7 +306,7 @@ else
   else
     # No Pi boot config found — likely Proxmox or other non-Pi Debian.
     warn "No I2C device found (/dev/i2c-*)."
-    if ! lsmod 2>/dev/null | grep -q i2c_dev; then
+    if ! grep -qw i2c_dev /proc/modules 2>/dev/null; then
       hint "The i2c-dev kernel module is not loaded."
       hint "Try:  sudo modprobe i2c-dev"
       hint "To make it persistent:  echo 'i2c-dev' | sudo tee /etc/modules-load.d/i2c.conf"
@@ -329,7 +329,11 @@ elif [[ -x /usr/sbin/i2cdetect ]]; then
 fi
 
 if [[ -n "${I2CDETECT}" ]] && [[ -e /dev/i2c-${I2C_BUS} ]]; then
-  if sudo "${I2CDETECT}" -y "${I2C_BUS}" 2>/dev/null | grep -qw "${OLED_I2C_ADDR#0x}"; then
+  # Capture the scan first instead of piping into `grep -q`: grep -q exits on
+  # the first match, i2cdetect then gets SIGPIPE (exit 141) writing the next
+  # row, and `set -o pipefail` turns that into a false negative.
+  I2C_SCAN="$(sudo "${I2CDETECT}" -y "${I2C_BUS}" 2>/dev/null || true)"
+  if grep -qw "${OLED_I2C_ADDR#0x}" <<<"${I2C_SCAN}"; then
     info "SSD1306 OLED detected at ${OLED_I2C_ADDR} on bus ${I2C_BUS} ✓"
   else
     warn "No device found at ${OLED_I2C_ADDR} on I2C bus ${I2C_BUS}."
