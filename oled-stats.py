@@ -4,6 +4,7 @@
 # widgets that rotate on a configurable cycle.
 
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -19,9 +20,10 @@ from PIL import Image, ImageDraw, ImageFont
 import adafruit_ssd1306
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_NAME = "oled-stats"
 
 
-# ── Config ──────────────────────────────────────────────────────────
+# ── Config (XDG Base Directory) ─────────────────────────────────────
 
 DEFAULT_CONFIG = {
     "panel": {"rows": 5, "update_interval": 1},
@@ -41,11 +43,30 @@ DEFAULT_CONFIG = {
 }
 
 
+def _xdg_config_path():
+    base = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+    return os.path.join(base, APP_NAME, "config.yaml")
+
+
 def load_config():
-    path = os.path.join(BASE_DIR, "config.yaml")
-    if os.path.exists(path):
-        with open(path) as f:
-            return yaml.safe_load(f)
+    """Load config with XDG → local → hardcoded fallback chain.
+
+    If a local config.yaml is found but the XDG copy doesn't exist yet,
+    it is automatically promoted (copied) to the XDG location.
+    """
+    xdg_path   = _xdg_config_path()
+    local_path = os.path.join(BASE_DIR, "config.yaml")
+
+    for path in (xdg_path, local_path):
+        if os.path.exists(path):
+            with open(path) as f:
+                cfg = yaml.safe_load(f)
+            # Auto-promote: local found but XDG missing → copy to XDG
+            if path == local_path and not os.path.exists(xdg_path):
+                os.makedirs(os.path.dirname(xdg_path), exist_ok=True)
+                shutil.copy2(local_path, xdg_path)
+            return cfg
+
     return DEFAULT_CONFIG
 
 
@@ -172,18 +193,19 @@ def w_net_status(draw, image, x, y, width, font, cfg, icons):
     kind = cfg.get("interface", "eth")
     info = get_net_info(kind)
 
+    col_w = 12  # fixed column width for each indicator (matches icon size)
     cx = x
 
-    # ── Default-route indicator: * or blank (fixed-width for alignment)
+    # ── Default-route indicator: * or blank
     if info["has_gw"]:
         draw.text((cx, y), "*", font=font, fill=255)
-    cx += 8
+    cx += col_w
 
     # ── Interface-type icon (12×12 bmp)
     icon = icons.get(kind)
     if icon:
         image.paste(icon, (cx, y))
-        cx += icon.width + 2
+    cx += col_w
 
     # ── Internet-access icon (only for default-route interfaces)
     if info["has_gw"]:
@@ -191,10 +213,13 @@ def w_net_status(draw, image, x, y, width, font, cfg, icons):
         inet_icon = icons.get(inet_key)
         if inet_icon:
             image.paste(inet_icon, (cx, y))
-            cx += inet_icon.width + 1
+    cx += col_w
 
-    # ── IP address
-    draw.text((cx, y), ": " + (info["ip"] or "N/A"), font=font, fill=255)
+    # ── IP address (right-aligned to display edge)
+    ip_text = info["ip"] or "N/A"
+    bbox = font.getbbox(ip_text)
+    ip_w = bbox[2] - bbox[0]
+    draw.text((x + width - ip_w, y), ip_text, font=font, fill=255)
 
 
 def w_cpu_bar(draw, image, x, y, width, font, cfg, icons):
