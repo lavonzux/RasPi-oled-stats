@@ -189,37 +189,67 @@ def w_hostname(draw, image, x, y, width, font, cfg, icons):
     draw.text((x, y), "Host: " + socket.gethostname(), font=font, fill=255)
 
 
+# 7×7 hand-drawn asterisk — the font's "*" is only ~5×4 px and smears
+# on a 1-bit display, so draw it pixel by pixel instead.
+_STAR_7 = (
+    "...#...",
+    "#..#..#",
+    ".#.#.#.",
+    "..###..",
+    ".#.#.#.",
+    "#..#..#",
+    "...#...",
+)
+
+
+def _draw_pattern(draw, x, y, pattern):
+    for r, row in enumerate(pattern):
+        for c, ch in enumerate(row):
+            if ch == "#":
+                draw.point((x + c, y + r), fill=255)
+
+
 def w_net_status(draw, image, x, y, width, font, cfg, icons):
     kind = cfg.get("interface", "eth")
     info = get_net_info(kind)
 
-    col_w = 12  # fixed column width for each indicator (matches icon size)
-    cx = x
+    COL_W  = 14     # fixed slot width: 12 px icon + 1 px padding each side
+    ICON_H = 12     # icon height, reference for vertical centering
 
-    # ── Default-route indicator: * or blank
+    def slot_x(i):
+        return x + i * COL_W
+
+    def paste_centered(img, i):
+        image.paste(img, (slot_x(i) + (COL_W - img.width) // 2,
+                          y + (ICON_H - img.height) // 2))
+
+    # ── Slot 0: default-route indicator (7×7 asterisk, centered)
     if info["has_gw"]:
-        draw.text((cx, y), "*", font=font, fill=255)
-    cx += col_w
+        n = len(_STAR_7)
+        _draw_pattern(draw,
+                      slot_x(0) + (COL_W - n) // 2,
+                      y + (ICON_H - n) // 2,
+                      _STAR_7)
 
-    # ── Interface-type icon (12×12 bmp)
+    # ── Slot 1: interface-type icon
     icon = icons.get(kind)
     if icon:
-        image.paste(icon, (cx, y))
-    cx += col_w
+        paste_centered(icon, 1)
 
-    # ── Internet-access icon (only for default-route interfaces)
+    # ── Slot 2: internet-access icon (only for default-route interfaces)
     if info["has_gw"]:
-        inet_key = "inet_up" if info["inet_up"] else "inet_down"
-        inet_icon = icons.get(inet_key)
+        inet_icon = icons.get("inet_up" if info["inet_up"] else "inet_down")
         if inet_icon:
-            image.paste(inet_icon, (cx, y))
-    cx += col_w
+            paste_centered(inet_icon, 2)
 
-    # ── IP address (right-aligned to display edge)
+    # ── IP address, right-aligned (never overlapping the icon slots)
+    # draw.text() puts ink at [x0 + bbox[0], x0 + bbox[2]), so the right
+    # edge must be aligned on bbox[2]. Using width = bbox[2] - bbox[0]
+    # overshoots by bbox[0] whenever the font has left-side bearing.
     ip_text = info["ip"] or "N/A"
-    bbox = font.getbbox(ip_text)
-    ip_w = bbox[2] - bbox[0]
-    draw.text((x + width - ip_w, y), ip_text, font=font, fill=255)
+    bbox = draw.textbbox((0, 0), ip_text, font=font)
+    ip_x = max(slot_x(3), x + width - bbox[2])
+    draw.text((ip_x, y), ip_text, font=font, fill=255)
 
 
 def w_cpu_bar(draw, image, x, y, width, font, cfg, icons):
@@ -273,7 +303,19 @@ def main():
     W, H   = disp.width, disp.height
     image  = Image.new("1", (W, H))
     draw   = ImageDraw.Draw(image)
-    font   = ImageFont.load_default()
+    # Font — size configurable via panel.font_size (default 12)
+    font_size = panel.get("font_size", 12)
+    _FONT_PATHS = (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    )
+    font = None
+    for fp in _FONT_PATHS:
+        if os.path.exists(fp):
+            font = ImageFont.truetype(fp, font_size)
+            break
+    if font is None:
+        font = ImageFont.load_default()
 
     # Pre-compute y positions: rows with explicit `height` get it;
     # the rest split whatever vertical space remains equally.
