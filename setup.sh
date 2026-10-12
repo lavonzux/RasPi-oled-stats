@@ -320,18 +320,26 @@ else
 fi
 
 # ── OLED on I2C bus? ─────────────────────────────────────────────────────────
-if command -v i2cdetect &>/dev/null && [[ -e /dev/i2c-${I2C_BUS} ]]; then
-  if sudo i2cdetect -y "${I2C_BUS}" 2>/dev/null | grep -qw "${OLED_I2C_ADDR#0x}"; then
+# i2cdetect lives in /usr/sbin which may not be in the regular user's PATH
+I2CDETECT=""
+if command -v i2cdetect &>/dev/null; then
+  I2CDETECT="i2cdetect"
+elif [[ -x /usr/sbin/i2cdetect ]]; then
+  I2CDETECT="/usr/sbin/i2cdetect"
+fi
+
+if [[ -n "${I2CDETECT}" ]] && [[ -e /dev/i2c-${I2C_BUS} ]]; then
+  if sudo "${I2CDETECT}" -y "${I2C_BUS}" 2>/dev/null | grep -qw "${OLED_I2C_ADDR#0x}"; then
     info "SSD1306 OLED detected at ${OLED_I2C_ADDR} on bus ${I2C_BUS} ✓"
   else
     warn "No device found at ${OLED_I2C_ADDR} on I2C bus ${I2C_BUS}."
     hint "Check that the OLED display is properly connected."
-    hint "Run 'i2cdetect -y ${I2C_BUS}' to see all devices on the bus."
+    hint "Run 'sudo i2cdetect -y ${I2C_BUS}' to see all devices on the bus."
     hint "If the OLED is at a different address (e.g. 0x3d), update"
     hint "OLED_I2C_ADDR in this script and I2C_ADDR in ${PYTHON_SCRIPT}."
     WARNINGS=$((WARNINGS + 1))
   fi
-elif [[ "${I2C_NEEDS_ENABLE}" == false ]]; then
+elif [[ -z "${I2CDETECT}" ]] && [[ "${I2C_NEEDS_ENABLE}" == false ]]; then
   warn "i2cdetect not available — skipping OLED detection."
   hint "It will be installed with i2c-tools in the next step."
   WARNINGS=$((WARNINGS + 1))
